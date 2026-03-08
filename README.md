@@ -14,6 +14,14 @@ Against two baselines:
 - **Dual-Tower** (all-MiniLM-L6-v2): cosine similarity, no interaction
 - **Cross-Encoder** (ms-marco-MiniLM-L6-v2): query-passage interaction only
 
+## Architecture
+
+### Causal LM
+![Causal LM Architecture](assets/architecture_causal.png)
+
+### Bidirectional Variant
+![Bidirectional Architecture](assets/architecture_bidirectional.png)
+
 ## Project Structure
 
 ```
