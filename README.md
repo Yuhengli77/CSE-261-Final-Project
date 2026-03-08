@@ -24,6 +24,9 @@ Against two baselines:
 │   ├── modeling.py         # Backbone loading, tokenization, classifier model
 │   ├── train_eval.py       # Training loop, evaluation, threshold tuning
 │   └── utils.py            # Helpers (seed, device, JSON I/O, formatting)
+├── scripts/
+│   └── draw_architecture.py # Architecture diagram generation
+├── assets/                  # Generated figures (architecture diagrams)
 ├── proposal/
 │   └── proposal.md         # Research proposal
 ├── tests/                  # Unit tests for src/
