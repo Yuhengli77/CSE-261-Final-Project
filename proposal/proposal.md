@@ -18,7 +18,7 @@ The first two approaches share a fundamental limitation: **passages are scored i
 
 Encoder-based models (cross-encoders) excel at discriminative scoring but are constrained by short context windows, preventing joint processing of all passages. LLMs offer large context windows (32K+ tokens) that easily accommodate a query and all candidate passages in a single sequence, but their standard usage requires autoregressive generation to produce judgments — even reducing the output to passage indices only alleviates, not eliminates, the decoding overhead.
 
-**Our insight:** we can combine the best of both worlds — use the LLM's large context window to jointly process all passages in a single prefill pass, then directly classify each passage from its hidden state representation, completely bypassing autoregressive decoding.
+**Our insight:** we can combine the best of both worlds — use the LLM's large context window to jointly process all passages in a single prefill pass, then directly classify each passage from its hidden state representation, completely bypassing autoregressive decoding. Concretely, both Qwen3-0.6B and Qwen3-Embedding-0.6B support 32K-token contexts, which is large enough to fit a query and all candidate documents at once — far exceeding the context limits of encoder models (512 tokens for BERT-family, up to 8K for recent models like ModernBERT).
 
 ### 2. Proposed Method: Hidden State Classification
 
