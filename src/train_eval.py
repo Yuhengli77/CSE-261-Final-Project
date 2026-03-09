@@ -242,6 +242,188 @@ def train_classifier(
     }
 
 
+def train_lora(
+    model: Any,
+    train_loader: Any,
+    validation_loader: Any,
+    train_config: "TrainConfig",
+    lora_config: Any,  # src.config.LoraConfig
+    output_dir: "Path | str",
+    device: str,
+) -> Dict[str, Any]:
+    """Training loop for LoRA fine-tuning.
+
+    Uses two parameter groups with separate learning rates:
+      - LoRA adapter params (backbone)  → ``lora_config.backbone_learning_rate``
+      - Classifier head params          → ``train_config.learning_rate``
+
+    Gradient clipping (max norm 1.0) is applied to prevent large updates through
+    the now-trainable backbone adapters.
+    """
+    _require_torch()
+
+    run_dir = ensure_dir(output_dir)
+
+    # Separate LoRA backbone params from the linear classifier head.
+    lora_params = [p for n, p in model.named_parameters() if "lora_" in n and p.requires_grad]
+    classifier_params = list(model.classifier.parameters())
+
+    optimizer = AdamW(
+        [
+            {
+                "params": lora_params,
+                "lr": lora_config.backbone_learning_rate,
+                "weight_decay": lora_config.backbone_weight_decay,
+            },
+            {
+                "params": classifier_params,
+                "lr": train_config.learning_rate,
+                "weight_decay": train_config.weight_decay,
+            },
+        ]
+    )
+
+    best_state = None
+    best_epoch = -1
+    best_summary = None
+    patience_left = train_config.patience
+    history = []
+
+    accum_steps = getattr(train_config, "gradient_accumulation_steps", 1)
+
+    model.to(device)
+    for epoch in range(1, train_config.epochs + 1):
+        model.train()
+        epoch_losses = []
+        optimizer.zero_grad()
+        for step, batch in enumerate(progress(
+            train_loader,
+            desc=f"LoRA epoch {epoch}/{train_config.epochs}",
+            leave=False,
+        )):
+            outputs = model(
+                input_ids=batch["input_ids"].to(device),
+                attention_mask=batch["attention_mask"].to(device),
+                passage_end_positions=batch["passage_end_positions"].to(device),
+                labels=batch["labels"].to(device),
+            )
+            # Scale loss so gradients are averaged over accumulation steps.
+            loss = outputs["loss"] / accum_steps
+            loss.backward()
+            epoch_losses.append(loss.item() * accum_steps)  # log unscaled
+
+            if (step + 1) % accum_steps == 0:
+                # Clip gradients through LoRA adapters to stabilise training.
+                torch.nn.utils.clip_grad_norm_(
+                    lora_params + classifier_params, max_norm=1.0
+                )
+                optimizer.step()
+                optimizer.zero_grad()
+
+        # Handle any remaining steps not covered by the last full accumulation.
+        if (step + 1) % accum_steps != 0:
+            torch.nn.utils.clip_grad_norm_(
+                lora_params + classifier_params, max_norm=1.0
+            )
+            optimizer.step()
+            optimizer.zero_grad()
+
+        validation_prediction = predict(model, validation_loader, device)
+        flat_labels = [label for row in validation_prediction["records"] for label in row["labels"]]
+        flat_probs = [
+            prob for row in validation_prediction["records"] for prob in row["probabilities"]
+        ]
+        threshold_result = search_best_threshold(
+            flat_labels,
+            flat_probs,
+            grid_size=train_config.threshold_grid_size,
+        )
+        summary = summarize_prediction_records(
+            validation_prediction["records"],
+            threshold=threshold_result["threshold"],
+        )
+        summary["loss"] = validation_prediction["loss"]
+        history.append(
+            {
+                "epoch": epoch,
+                "train_loss": sum(epoch_losses) / len(epoch_losses),
+                "validation": summary,
+            }
+        )
+
+        if best_summary is None or summary["overall"]["f1"] > best_summary["overall"]["f1"]:
+            best_summary = summary
+            best_epoch = epoch
+            patience_left = train_config.patience
+
+            # Save only the LoRA adapter weights (a few MB) via PEFT's
+            # save_pretrained, plus the classifier head separately.
+            # Saving model.state_dict() would include all frozen base weights
+            # (~1.2 GB) and its keys are incompatible with plain load_state_dict
+            # on a PEFT-wrapped model.
+            adapter_dir = run_dir / "best_lora_adapter"
+            model.backbone.save_pretrained(str(adapter_dir))
+            classifier_state = {
+                "weight": model.classifier.weight.detach().cpu(),
+                "bias": model.classifier.bias.detach().cpu(),
+            }
+            torch.save(
+                {
+                    "classifier_state": classifier_state,
+                    "epoch": epoch,
+                    "threshold": threshold_result["threshold"],
+                    "validation_summary": summary,
+                },
+                run_dir / "best_classifier.pt",
+            )
+            # Keep an in-memory snapshot for restoring the best epoch at the end.
+            best_state = {
+                "classifier_state": {
+                    "weight": classifier_state["weight"].clone(),
+                    "bias": classifier_state["bias"].clone(),
+                },
+                "epoch": epoch,
+                "threshold": threshold_result["threshold"],
+                "validation_summary": summary,
+            }
+        else:
+            patience_left -= 1
+            if patience_left <= 0:
+                break
+
+    if best_state is None or best_summary is None:
+        raise RuntimeError("LoRA training did not produce a valid checkpoint.")
+
+    # Restore best classifier weights into the live model.
+    model.classifier.weight.data.copy_(best_state["classifier_state"]["weight"].to(device))
+    model.classifier.bias.data.copy_(best_state["classifier_state"]["bias"].to(device))
+    # Note: adapter weights on disk in best_lora_adapter/ already correspond to the
+    # best epoch because save_pretrained was called at that checkpoint.
+
+    save_json(
+        {
+            "best_epoch": best_epoch,
+            "history": history,
+            "best_validation": best_summary,
+            "best_threshold": best_state["threshold"],
+        },
+        run_dir / "training_history.json",
+    )
+
+    return {
+        "best_epoch": best_epoch,
+        "best_threshold": best_state["threshold"],
+        "best_validation": best_summary,
+        # Two artefacts to reload the model later:
+        #   adapter weights  → best_lora_adapter/  (PeftModel.from_pretrained)
+        #   classifier head  → best_classifier.pt  (torch.load)
+        "adapter_dir": str(run_dir / "best_lora_adapter"),
+        "classifier_path": str(run_dir / "best_classifier.pt"),
+        "history_path": str(run_dir / "training_history.json"),
+    }
+
+
+
 def evaluate_and_save(
     model: Any,
     dataloader: Any,

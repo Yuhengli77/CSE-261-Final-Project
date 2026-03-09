@@ -4,3 +4,4 @@ artifacts/cache
 artifacts/runs/bidirectional/best_model.pt
 artifacts/runs/causal/best_model.pt
 src/__pycache__
+.DS_Store

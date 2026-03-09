@@ -18,6 +18,12 @@ except ImportError:
     AutoModel = None
     AutoTokenizer = None
 
+try:
+    from peft import LoraConfig as PeftLoraConfig, get_peft_model, TaskType  # type: ignore
+    _PEFT_AVAILABLE = True
+except ImportError:
+    _PEFT_AVAILABLE = False
+
 
 def _require_torch() -> None:
     if torch is None or nn is None:
@@ -119,6 +125,83 @@ def load_backbone_and_tokenizer(model_config: ModelConfig) -> tuple[Any, Any]:
 
     for parameter in model.parameters():
         parameter.requires_grad = False
+
+    return model, tokenizer
+
+
+def load_backbone_and_tokenizer_lora(model_config: ModelConfig) -> tuple[Any, Any]:
+    """Load backbone and apply LoRA adapters (backbone params trainable via LoRA only).
+
+    Requires ``model_config.lora`` to be set.  Falls back to fully-frozen loading
+    with a warning if PEFT is not installed.
+    """
+    _require_torch()
+    _require_transformers()
+
+    if model_config.lora is None:
+        raise ValueError("model_config.lora must be set to use load_backbone_and_tokenizer_lora.")
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_config.model_name_or_path,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+    model = AutoModel.from_pretrained(
+        model_config.model_name_or_path,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+
+    if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+        elif tokenizer.sep_token is not None:
+            tokenizer.pad_token = tokenizer.sep_token
+        else:
+            raise ValueError("Tokenizer must define a pad, eos, or sep token.")
+
+    if not _PEFT_AVAILABLE:
+        import warnings
+        warnings.warn(
+            "peft is not installed — falling back to fully-frozen backbone. "
+            "Install with: pip install peft",
+            RuntimeWarning,
+        )
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        return model, tokenizer
+
+    lora_cfg = model_config.lora
+
+    # Auto-detect attention projection modules if not specified.
+    target_modules = lora_cfg.target_modules
+    if target_modules is None:
+        # Inspect the model's named modules to find q/v projection layers.
+        # This covers most HuggingFace transformer architectures.
+        candidate_patterns = ["q_proj", "v_proj", "query", "value", "query_key_value"]
+        found = {
+            name.split(".")[-1]
+            for name, module in model.named_modules()
+            if isinstance(module, torch.nn.Linear)
+            and any(pat in name for pat in candidate_patterns)
+        }
+        target_modules = sorted(found) if found else ["q_proj", "v_proj"]
+
+    peft_config = PeftLoraConfig(
+        r=lora_cfg.r,
+        lora_alpha=lora_cfg.lora_alpha,
+        lora_dropout=lora_cfg.lora_dropout,
+        target_modules=target_modules,
+        bias="none",
+        # FEATURE_EXTRACTION is used for encoder/embedding models and causal LMs
+        # when we are NOT doing language-modelling loss (we use our own BCE head).
+        task_type=TaskType.FEATURE_EXTRACTION,
+    )
+
+    # Freeze all params first, then let PEFT unfreeze only the LoRA adapters.
+    for parameter in model.parameters():
+        parameter.requires_grad = False
+
+    model = get_peft_model(model, peft_config)
+    model.print_trainable_parameters()
 
     return model, tokenizer
 
