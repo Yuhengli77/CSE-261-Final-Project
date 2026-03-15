@@ -40,7 +40,6 @@ This distinction matters when comparing numbers: the generic baselines test out-
 
 ```
 ├── experiment.ipynb        # Main end-to-end experiment notebook (run on Colab)
-├── experiment2.ipynb       # Minimal notebook for the two in-domain baselines
 ├── src/
 │   ├── config.py           # Experiment configuration
 │   ├── data.py             # HotpotQA data loading and preprocessing
@@ -52,7 +51,6 @@ This distinction matters when comparing numbers: the generic baselines test out-
 ├── assets/                  # Generated figures (architecture diagrams)
 ├── proposal/
 │   └── proposal.md         # Research proposal
-├── tests/                  # Unit tests for src/
 └── artifacts/runs/         # Saved results (generated after running experiments)
     ├── causal/
     ├── causal_lora/
